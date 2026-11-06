@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 import UIKit
 
 @MainActor
@@ -17,8 +18,12 @@ final class RemoteClient: ObservableObject {
     private var receiver: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     private var frameTask: Task<Void, Never>?
+    private var decoderTask: Task<Void, Never>?
     private var httpFlushTask: Task<Void, Never>?
+    private var moveFlushTask: Task<Void, Never>?
     private var httpQueue = [[String: Any]]()
+    private var pendingFrameData: Data?
+    private var pendingMove: [String: Any]?
     private var httpMode = false
     private var lastPing = Date()
     private var selectedQuality = -1
@@ -121,11 +126,12 @@ final class RemoteClient: ObservableObject {
             do {
                 var request = URLRequest(url: address.appendingPathComponent("frame"))
                 request.timeoutInterval = 8
-                request.setValue(selectedQuality == 2 ? "smooth" : "text", forHTTPHeaderField: "X-TailDesk-Quality")
+                request.setValue(selectedQuality == 0 ? "text" : "smooth", forHTTPHeaderField: "X-TailDesk-Quality")
                 let started = Date()
                 let (data, response) = try await session.data(for: request)
                 guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-                      data.count <= 8 * 1024 * 1024, let image = UIImage(data: data) else {
+                      data.count <= 8 * 1024 * 1024,
+                      let image = await Self.decodeImage(data) else {
                     throw ClientError("兼容模式画面响应无效")
                 }
                 frame = image
@@ -153,9 +159,8 @@ final class RemoteClient: ObservableObject {
                 let message = try await task.receive()
                 switch message {
                 case .data(let data):
-                    guard data.count <= 8 * 1024 * 1024, let image = UIImage(data: data),
-                          image.size.width <= 4096, image.size.height <= 4096 else { throw ClientError("远程画面数据无效") }
-                    frame = image
+                    guard data.count <= 8 * 1024 * 1024 else { throw ClientError("远程画面数据过大") }
+                    enqueueFrame(data)
                     retryCount = 0
                     send(["type": "ack"])
                 case .string(let text):
@@ -165,7 +170,7 @@ final class RemoteClient: ObservableObject {
                             retryCount = 0
                             rtt = max(0, Int(Date().timeIntervalSince(lastPing) * 1000))
                             status = "已连接 · \(computer) · RTT \(rtt) ms"
-                            if selectedQuality == -1 { sendQuality(rtt > 250 ? 2 : 1) }
+                            if selectedQuality == -1 { sendQuality(rtt > 140 ? 2 : 1) }
                         } else if json["type"] as? String == "error", let message = json["message"] as? String {
                             status = message
                         }
@@ -189,14 +194,21 @@ final class RemoteClient: ObservableObject {
 
     func quality(_ mode: Int) {
         selectedQuality = mode
-        sendQuality(mode < 0 ? 1 : mode)
+        sendQuality(mode < 0 ? 2 : mode)
     }
 
     private func sendQuality(_ mode: Int) { send(["type": "quality", "mode": mode]) }
 
     func mouse(x: Int, y: Int, action: Int, wheel: Int = 0) {
         pointerX = min(65535, max(0, x)); pointerY = min(65535, max(0, y))
-        send(["type": "mouse", "x": pointerX, "y": pointerY, "action": action, "wheel": wheel])
+        let event: [String: Any] = ["type": "mouse", "x": pointerX, "y": pointerY, "action": action, "wheel": wheel]
+        if action == 0 && wheel == 0 {
+            pendingMove = event
+            scheduleMoveFlush()
+        } else {
+            flushPendingMove()
+            send(event)
+        }
     }
 
     func movePointer(dx: CGFloat, dy: CGFloat) {
@@ -247,6 +259,63 @@ final class RemoteClient: ObservableObject {
         }
     }
 
+    private func scheduleMoveFlush() {
+        guard moveFlushTask == nil else { return }
+        moveFlushTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 12_000_000)
+            guard !Task.isCancelled else { return }
+            self?.moveFlushTask = nil
+            self?.flushPendingMove()
+        }
+    }
+
+    private func flushPendingMove() {
+        guard let event = pendingMove else { return }
+        pendingMove = nil
+        send(event)
+    }
+
+    private func enqueueFrame(_ data: Data) {
+        pendingFrameData = data
+        guard decoderTask == nil else { return }
+        decoderTask = Task { [weak self] in await self?.decodePendingFrames() }
+    }
+
+    private func decodePendingFrames() async {
+        while !Task.isCancelled, let data = pendingFrameData {
+            pendingFrameData = nil
+            if let image = await Self.decodeImage(data) { frame = image }
+        }
+        decoderTask = nil
+        if pendingFrameData != nil { enqueueFrame(pendingFrameData!) }
+    }
+
+    nonisolated private static func decodeImage(_ data: Data) async -> UIImage? {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInteractive).async {
+                autoreleasepool {
+                    guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+                          let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+                          let width = properties[kCGImagePropertyPixelWidth] as? Int,
+                          let height = properties[kCGImagePropertyPixelHeight] as? Int,
+                          width > 0, height > 0, width <= 4096, height <= 4096 else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    let options: [CFString: Any] = [
+                        kCGImageSourceShouldCache: true,
+                        kCGImageSourceShouldCacheImmediately: true
+                    ]
+                    guard let image = CGImageSourceCreateImageAtIndex(source, 0, options as CFDictionary) else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    continuation.resume(returning: UIImage(cgImage: image))
+                }
+            }
+        }
+    }
+
     private func scheduleHTTPFlush() {
         guard httpFlushTask == nil else { return }
         httpFlushTask = Task { [weak self] in
@@ -284,10 +353,10 @@ final class RemoteClient: ObservableObject {
         let address = baseURL
         let currentSession = session
         let token = csrf
-        receiver?.cancel(); heartbeat?.cancel(); reconnectTask?.cancel(); frameTask?.cancel(); httpFlushTask?.cancel()
+        receiver?.cancel(); heartbeat?.cancel(); reconnectTask?.cancel(); frameTask?.cancel(); decoderTask?.cancel(); httpFlushTask?.cancel(); moveFlushTask?.cancel()
         socket?.cancel(with: .normalClosure, reason: nil)
-        socket = nil; receiver = nil; heartbeat = nil; reconnectTask = nil; frameTask = nil; httpFlushTask = nil
-        httpQueue.removeAll(); httpMode = false
+        socket = nil; receiver = nil; heartbeat = nil; reconnectTask = nil; frameTask = nil; decoderTask = nil; httpFlushTask = nil; moveFlushTask = nil
+        httpQueue.removeAll(); pendingFrameData = nil; pendingMove = nil; httpMode = false
         connected = false; frame = nil
         if logout, let address, let currentSession, !token.isEmpty {
             Task {
