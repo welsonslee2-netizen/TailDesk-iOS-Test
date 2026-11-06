@@ -13,7 +13,7 @@ struct RemoteKeyboard: UIViewRepresentable {
         field.autocorrectionType = .no
         field.spellCheckingType = .no
         field.autocapitalizationType = .none
-        field.returnKeyType = .return
+        field.returnKeyType = .default
         field.textColor = .clear
         field.tintColor = .clear
         field.accessibilityLabel = "远程键盘输入"
