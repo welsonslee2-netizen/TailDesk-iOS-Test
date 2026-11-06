@@ -1,0 +1,233 @@
+import Foundation
+import UIKit
+
+@MainActor
+final class RemoteClient: ObservableObject {
+    @Published var frame: UIImage?
+    @Published var status = "尚未连接"
+    @Published var connected = false
+    @Published var computer = ""
+    @Published var rtt = 0
+
+    private var session: URLSession?
+    private var socket: URLSessionWebSocketTask?
+    private var baseURL: URL?
+    private var csrf = ""
+    private var heartbeat: Task<Void, Never>?
+    private var receiver: Task<Void, Never>?
+    private var reconnectTask: Task<Void, Never>?
+    private var lastPing = Date()
+    private var selectedQuality = -1
+    private var retryCount = 0
+    private var manualDisconnect = false
+    private var pointerX = 32768
+    private var pointerY = 32768
+
+    private struct LoginReply: Decodable { let csrf: String; let computer: String }
+    private struct ErrorReply: Decodable { let error: String }
+
+    func connect(endpoint: String, password: String) async {
+        disconnect(logout: false)
+        manualDisconnect = false
+        retryCount = 0
+        do {
+            let address = try Self.parse(endpoint)
+            baseURL = address
+            status = "正在验证密码…"
+            let configuration = URLSessionConfiguration.default
+            configuration.timeoutIntervalForRequest = 8
+            configuration.httpCookieAcceptPolicy = .always
+            let currentSession = URLSession(configuration: configuration)
+            session = currentSession
+
+            var request = URLRequest(url: address.appendingPathComponent("login"))
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: ["password": password])
+            let (data, response) = try await currentSession.data(for: request)
+            guard let http = response as? HTTPURLResponse else { throw ClientError("登录响应无效") }
+            guard http.statusCode == 200 else { throw ClientError(Self.serverError(data, fallback: "密码验证失败（\(http.statusCode)）")) }
+            let login = try JSONDecoder().decode(LoginReply.self, from: data)
+            csrf = login.csrf
+            computer = login.computer
+            try openSocket(session: currentSession, address: address)
+        } catch {
+            status = error.localizedDescription
+            connected = false
+        }
+    }
+
+    private func openSocket(session: URLSession, address: URL) throws {
+        var parts = URLComponents(url: address.appendingPathComponent("stream"), resolvingAgainstBaseURL: false)!
+        parts.scheme = "ws"
+        guard let url = parts.url else { throw ClientError("长连接地址无效") }
+        var request = URLRequest(url: url)
+        request.setValue("taildesk.\(csrf)", forHTTPHeaderField: "Sec-WebSocket-Protocol")
+        if let cookies = HTTPCookieStorage.shared.cookies(for: address), !cookies.isEmpty {
+            let fields = HTTPCookie.requestHeaderFields(with: cookies)
+            request.setValue(fields["Cookie"], forHTTPHeaderField: "Cookie")
+        }
+        let task = session.webSocketTask(with: request)
+        socket = task
+        task.resume()
+        connected = true
+        status = "已连接 · \(computer)"
+        quality(selectedQuality)
+        receiver = Task { [weak self] in await self?.receiveLoop(task) }
+        heartbeat = Task { [weak self] in await self?.heartbeatLoop(task) }
+    }
+
+    private func receiveLoop(_ task: URLSessionWebSocketTask) async {
+        do {
+            while !Task.isCancelled, socket === task {
+                let message = try await task.receive()
+                switch message {
+                case .data(let data):
+                    guard data.count <= 8 * 1024 * 1024, let image = UIImage(data: data),
+                          image.size.width <= 4096, image.size.height <= 4096 else { throw ClientError("远程画面数据无效") }
+                    frame = image
+                    retryCount = 0
+                    send(["type": "ack"])
+                case .string(let text):
+                    if let data = text.data(using: .utf8),
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        if json["type"] as? String == "pong" {
+                            retryCount = 0
+                            rtt = max(0, Int(Date().timeIntervalSince(lastPing) * 1000))
+                            status = "已连接 · \(computer) · RTT \(rtt) ms"
+                            if selectedQuality == -1 { sendQuality(rtt > 250 ? 2 : 1) }
+                        } else if json["type"] as? String == "error", let message = json["message"] as? String {
+                            status = message
+                        }
+                    }
+                @unknown default: break
+                }
+            }
+        } catch {
+            if socket === task { connectionEnded(error.localizedDescription) }
+        }
+    }
+
+    private func heartbeatLoop(_ task: URLSessionWebSocketTask) async {
+        while !Task.isCancelled, socket === task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            if Task.isCancelled || socket !== task { return }
+            lastPing = Date()
+            send(["type": "ping"])
+        }
+    }
+
+    func quality(_ mode: Int) {
+        selectedQuality = mode
+        sendQuality(mode < 0 ? 1 : mode)
+    }
+
+    private func sendQuality(_ mode: Int) { send(["type": "quality", "mode": mode]) }
+
+    func mouse(x: Int, y: Int, action: Int, wheel: Int = 0) {
+        pointerX = min(65535, max(0, x)); pointerY = min(65535, max(0, y))
+        send(["type": "mouse", "x": pointerX, "y": pointerY, "action": action, "wheel": wheel])
+    }
+
+    func click(x: Int, y: Int, right: Bool = false) {
+        mouse(x: x, y: y, action: right ? 3 : 1)
+        mouse(x: x, y: y, action: right ? 4 : 2)
+    }
+
+    func key(_ code: Int) {
+        send(["type": "key", "key": code, "down": true])
+        send(["type": "key", "key": code, "down": false])
+    }
+
+    func clickCurrent(right: Bool = false) { click(x: pointerX, y: pointerY, right: right) }
+    func leftButton(down: Bool) { mouse(x: pointerX, y: pointerY, action: down ? 1 : 2) }
+    func scroll(_ amount: Int) { mouse(x: pointerX, y: pointerY, action: 7, wheel: amount) }
+
+    func text(_ value: String) {
+        guard !value.isEmpty else { return }
+        var start = value.startIndex
+        while start < value.endIndex {
+            let end = value.index(start, offsetBy: 128, limitedBy: value.endIndex) ?? value.endIndex
+            send(["type": "text", "text": String(value[start..<end])])
+            start = end
+        }
+    }
+
+    func release() { send(["type": "release"]) }
+
+    private func send(_ object: [String: Any]) {
+        guard connected, let socket,
+              let data = try? JSONSerialization.data(withJSONObject: object),
+              let text = String(data: data, encoding: .utf8) else { return }
+        socket.send(.string(text)) { [weak self] error in
+            if let error { Task { @MainActor in self?.connectionEnded(error.localizedDescription) } }
+        }
+    }
+
+    func disconnect(logout: Bool = true) {
+        manualDisconnect = true
+        release()
+        let address = baseURL
+        let currentSession = session
+        let token = csrf
+        receiver?.cancel(); heartbeat?.cancel(); reconnectTask?.cancel()
+        socket?.cancel(with: .normalClosure, reason: nil)
+        socket = nil; receiver = nil; heartbeat = nil; reconnectTask = nil
+        connected = false; frame = nil
+        if logout, let address, let currentSession, !token.isEmpty {
+            Task {
+                var request = URLRequest(url: address.appendingPathComponent("logout"))
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.setValue(token, forHTTPHeaderField: "X-TailDesk-CSRF")
+                request.httpBody = Data("{}".utf8)
+                _ = try? await currentSession.data(for: request)
+            }
+        }
+        csrf = ""; status = "已断开"
+    }
+
+    private func connectionEnded(_ message: String) {
+        guard connected else { return }
+        connected = false
+        receiver?.cancel(); heartbeat?.cancel()
+        status = "连接已中断：\(message) · 正在重连"
+        socket = nil
+        guard !manualDisconnect, let address = baseURL, let currentSession = session else { return }
+        retryCount += 1
+        let delay = min(15, 1 << min(4, retryCount - 1))
+        reconnectTask?.cancel()
+        reconnectTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000_000)
+            guard let self, !Task.isCancelled, !self.manualDisconnect, !self.connected else { return }
+            do { try self.openSocket(session: currentSession, address: address) }
+            catch { self.connectionEnded(error.localizedDescription) }
+        }
+    }
+
+    private static func parse(_ endpoint: String) throws -> URL {
+        let raw = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        let full = raw.contains(":") ? raw : raw + ":59011"
+        let pieces = full.split(separator: ":", omittingEmptySubsequences: false)
+        guard pieces.count == 2, let port = Int(pieces[1]), (1024...65535).contains(port) else {
+            throw ClientError("请输入 Tailscale IPv4:端口，例如 100.101.102.103:59011")
+        }
+        let octets = pieces[0].split(separator: ".").compactMap { Int($0) }
+        guard octets.count == 4, octets.allSatisfy({ (0...255).contains($0) }),
+              (octets[0] == 127 || (octets[0] == 100 && (64...127).contains(octets[1]))) else {
+            throw ClientError("仅连接 Tailscale IPv4 或 127.0.0.1")
+        }
+        return URL(string: "http://\(pieces[0]):\(port)/")!
+    }
+
+    private static func serverError(_ data: Data, fallback: String) -> String {
+        (try? JSONDecoder().decode(ErrorReply.self, from: data).error) ?? fallback
+    }
+
+    private struct ClientError: LocalizedError {
+        let message: String
+        init(_ message: String) { self.message = message }
+        var errorDescription: String? { message }
+    }
+}
+

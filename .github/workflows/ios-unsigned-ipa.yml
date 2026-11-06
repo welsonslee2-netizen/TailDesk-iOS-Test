@@ -1,0 +1,51 @@
+name: Build TailDesk iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "mobile/ios/**"
+      - "scripts/build-ios-unsigned.sh"
+      - ".github/workflows/ios-unsigned-ipa.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: taildesk-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build unsigned IPA
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Show toolchain
+        run: |
+          set -euxo pipefail
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build and validate unsigned IPA
+        run: bash scripts/build-ios-unsigned.sh
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: TailDesk-iOS-unsigned-${{ github.run_number }}
+          path: |
+            artifacts/ios/TailDesk-unsigned.ipa
+            artifacts/ios/TailDesk-unsigned.ipa.sha256
+            artifacts/ios/build-info.txt
+          if-no-files-found: error
+          retention-days: 7
+

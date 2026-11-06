@@ -1,0 +1,23 @@
+name: TailDeskMobile
+options:
+  bundleIdPrefix: com.taildesk
+  deploymentTarget:
+    iOS: "16.0"
+settings:
+  base:
+    SWIFT_VERSION: 5.9
+    TARGETED_DEVICE_FAMILY: "1,2"
+targets:
+  TailDeskMobile:
+    type: application
+    platform: iOS
+    sources:
+      - TailDeskMobile
+    info:
+      path: TailDeskMobile/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.taildesk.mobile
+        PRODUCT_NAME: TailDesk
+        CODE_SIGN_STYLE: Automatic
+
