@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var client: RemoteClient
+    @EnvironmentObject private var history: ConnectionHistoryStore
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("lastEndpoint") private var endpoint = ""
     @State private var password = ""
@@ -13,6 +14,7 @@ struct ContentView: View {
     @State private var dragLocked = false
     @State private var quality = -1
     @State private var showMousePad = true
+    @State private var isFullscreen = false
     @FocusState private var loginField: LoginField?
 
     private enum LoginField: Hashable { case endpoint, password }
@@ -23,8 +25,12 @@ struct ContentView: View {
         }
         .preferredColorScheme(.dark)
         .dynamicTypeSize(.xSmall ... .accessibility1)
+        .statusBarHidden(isFullscreen && client.connected)
         .onChange(of: scenePhase) { phase in
             if phase != .active { client.release(); dragLocked = false }
+        }
+        .onChange(of: client.connected) { connected in
+            if !connected, isFullscreen { leaveFullscreen() }
         }
     }
 
@@ -39,6 +45,20 @@ struct ContentView: View {
                     Text("通过 Tailscale 安全连接自己的电脑")
                         .font(.body)
                         .foregroundStyle(.secondary)
+
+                    if !history.entries.isEmpty {
+                        Menu {
+                            ForEach(history.entries) { entry in
+                                Button(entry.title) { selectHistory(entry) }
+                            }
+                            Divider()
+                            Button("清空历史连接", role: .destructive) { history.removeAll() }
+                        } label: {
+                            Label("历史连接（\(history.entries.count)）", systemImage: "clock.arrow.circlepath")
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .buttonStyle(.bordered)
+                    }
 
                     VStack(alignment: .leading, spacing: 8) {
                         Label("电脑地址", systemImage: "desktopcomputer")
@@ -125,16 +145,27 @@ struct ContentView: View {
         guard !connecting else { return }
         loginField = nil
         connecting = true
+        let submittedPassword = password
         Task {
-            await client.connect(endpoint: endpoint, password: password)
+            await client.connect(endpoint: endpoint, password: submittedPassword)
             connecting = false
-            if client.connected { password = "" }
+            if client.connected {
+                history.save(endpoint: endpoint, computer: client.computer, password: submittedPassword)
+                password = ""
+            }
         }
+    }
+
+    private func selectHistory(_ entry: SavedConnection) {
+        endpoint = entry.endpoint
+        password = history.password(for: entry)
+        loginField = password.isEmpty ? .password : nil
     }
 
     private var remoteView: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
+            if !isFullscreen {
+                HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(client.computer).font(.headline).lineLimit(1)
                     Text(client.status).font(.caption).foregroundStyle(.secondary).lineLimit(2)
@@ -149,11 +180,16 @@ struct ContentView: View {
                     Label("控制", systemImage: "cursorarrow.motionlines")
                 }
                 .buttonStyle(.bordered)
+                Button { enterFullscreen() } label: {
+                    Label("全屏", systemImage: "arrow.up.left.and.arrow.down.right")
+                }
+                .buttonStyle(.bordered)
                 Button("断开") { client.disconnect() }.buttonStyle(.bordered)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(.thinMaterial)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(.thinMaterial)
 
             ZStack(alignment: .topTrailing) {
                 RemoteScreenView(client: client, mode: $mode, zoom: $zoom, command: screenCommand)
@@ -167,6 +203,15 @@ struct ContentView: View {
                     .padding(.vertical, 4)
                     .background(.ultraThinMaterial, in: Capsule())
                     .padding(8)
+                if isFullscreen {
+                    HStack(spacing: 8) {
+                        floatingButton("keyboard", label: "键盘") { keyboardToken += 1 }
+                        floatingButton("cursorarrow.motionlines", label: "虚拟鼠标") { showMousePad.toggle() }
+                        floatingButton("arrow.down.right.and.arrow.up.left", label: "退出全屏") { leaveFullscreen() }
+                    }
+                    .padding(.trailing, 8)
+                    .padding(.top, 38)
+                }
             }
             .frame(maxHeight: .infinity)
 
@@ -176,7 +221,8 @@ struct ContentView: View {
                     .background(.thinMaterial)
             }
 
-            ScrollView(.horizontal, showsIndicators: false) {
+            if !isFullscreen {
+                ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     toolButton("键盘", system: "keyboard") { keyboardToken += 1 }
                     toolButton("鼠标", system: "cursorarrow") { showMousePad.toggle() }
@@ -197,9 +243,23 @@ struct ContentView: View {
                     .buttonStyle(.bordered)
                 }
                 .padding(8)
+                }
+                .background(.thinMaterial)
             }
-            .background(.thinMaterial)
         }
+        .ignoresSafeArea(.container, edges: isFullscreen ? .all : Edge.Set())
+    }
+
+    private func enterFullscreen() {
+        showMousePad = false
+        isFullscreen = true
+        nextScreenCommand(fit: true)
+        OrientationManager.requestLandscape()
+    }
+
+    private func leaveFullscreen() {
+        isFullscreen = false
+        OrientationManager.releaseLandscape()
     }
 
     private var qualityName: String {
@@ -221,6 +281,21 @@ struct ContentView: View {
         }
         .buttonStyle(.bordered)
     }
+
+    private func floatingButton(_ system: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: system)
+                .font(.headline)
+                .frame(width: 38, height: 38)
+                .background(.ultraThinMaterial, in: Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+    }
 }
 
-#Preview { ContentView().environmentObject(RemoteClient()) }
+#Preview {
+    ContentView()
+        .environmentObject(RemoteClient())
+        .environmentObject(ConnectionHistoryStore())
+}

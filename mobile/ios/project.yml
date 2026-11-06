@@ -17,6 +17,7 @@ targets:
       base:
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: TailDeskMobile/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         PRODUCT_BUNDLE_IDENTIFIER: com.taildesk.mobile
         PRODUCT_NAME: TailDesk
         CODE_SIGN_STYLE: Automatic

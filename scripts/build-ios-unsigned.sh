@@ -34,12 +34,13 @@ test -x "$APP_PATH/TailDesk"
 /usr/bin/plutil -extract CFBundleDisplayName raw "$APP_PATH/Info.plist" | grep -Fx 'TailDesk'
 /usr/bin/plutil -extract CFBundleExecutable raw "$APP_PATH/Info.plist" | grep -Fx 'TailDesk'
 /usr/bin/plutil -extract CFBundlePackageType raw "$APP_PATH/Info.plist" | grep -Fx 'APPL'
-/usr/bin/plutil -extract CFBundleShortVersionString raw "$APP_PATH/Info.plist" | grep -Fx '0.6'
-/usr/bin/plutil -extract CFBundleVersion raw "$APP_PATH/Info.plist" | grep -Fx '6'
+/usr/bin/plutil -extract CFBundleShortVersionString raw "$APP_PATH/Info.plist" | grep -Fx '0.7'
+/usr/bin/plutil -extract CFBundleVersion raw "$APP_PATH/Info.plist" | grep -Fx '7'
 /usr/bin/plutil -extract MinimumOSVersion raw "$APP_PATH/Info.plist" | grep -Fx '16.0'
 /usr/bin/plutil -extract NSLocalNetworkUsageDescription raw "$APP_PATH/Info.plist" | grep -F 'Tailscale'
 /usr/bin/plutil -extract NSAppTransportSecurity.NSAllowsArbitraryLoads raw "$APP_PATH/Info.plist" | grep -Fx 'true'
 /usr/bin/lipo -info "$APP_PATH/TailDesk"
+test -f "$APP_PATH/AppIcon60x60@2x.png"
 
 cp -R "$APP_PATH" "$PAYLOAD_DIR/"
 cd "$(dirname "$PAYLOAD_DIR")"
