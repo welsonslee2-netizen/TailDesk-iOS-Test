@@ -16,12 +16,16 @@ final class RemoteClient: ObservableObject {
     private var heartbeat: Task<Void, Never>?
     private var receiver: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
+    private var frameTask: Task<Void, Never>?
+    private var httpFlushTask: Task<Void, Never>?
+    private var httpQueue = [[String: Any]]()
+    private var httpMode = false
     private var lastPing = Date()
     private var selectedQuality = -1
     private var retryCount = 0
     private var manualDisconnect = false
-    private var pointerX = 32768
-    private var pointerY = 32768
+    @Published private(set) var pointerX = 32768
+    @Published private(set) var pointerY = 32768
 
     private struct LoginReply: Decodable { let csrf: String; let computer: String }
     private struct ErrorReply: Decodable { let error: String }
@@ -37,6 +41,8 @@ final class RemoteClient: ObservableObject {
             let configuration = URLSessionConfiguration.default
             configuration.timeoutIntervalForRequest = 8
             configuration.httpCookieAcceptPolicy = .always
+            configuration.httpCookieStorage = .shared
+            configuration.httpShouldSetCookies = true
             let currentSession = URLSession(configuration: configuration)
             session = currentSession
 
@@ -50,31 +56,95 @@ final class RemoteClient: ObservableObject {
             let login = try JSONDecoder().decode(LoginReply.self, from: data)
             csrf = login.csrf
             computer = login.computer
-            try openSocket(session: currentSession, address: address)
+            try await verifySession(session: currentSession, address: address)
+            do {
+                try await openSocket(session: currentSession, address: address)
+            } catch {
+                startHTTPMode(session: currentSession, address: address)
+            }
         } catch {
             status = error.localizedDescription
             connected = false
         }
     }
 
-    private func openSocket(session: URLSession, address: URL) throws {
+    private func verifySession(session: URLSession, address: URL) async throws {
+        let request = URLRequest(url: address.appendingPathComponent("session"))
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw ClientError("会话验证响应无效") }
+        guard http.statusCode == 200 else {
+            throw ClientError(Self.serverError(data, fallback: "会话 Cookie 验证失败（\(http.statusCode)）"))
+        }
+    }
+
+    private func openSocket(session: URLSession, address: URL) async throws {
         var parts = URLComponents(url: address.appendingPathComponent("stream"), resolvingAgainstBaseURL: false)!
         parts.scheme = "ws"
         guard let url = parts.url else { throw ClientError("长连接地址无效") }
         var request = URLRequest(url: url)
         request.setValue("taildesk.\(csrf)", forHTTPHeaderField: "Sec-WebSocket-Protocol")
-        if let cookies = HTTPCookieStorage.shared.cookies(for: address), !cookies.isEmpty {
+        if let cookies = session.configuration.httpCookieStorage?.cookies(for: address), !cookies.isEmpty {
             let fields = HTTPCookie.requestHeaderFields(with: cookies)
             request.setValue(fields["Cookie"], forHTTPHeaderField: "Cookie")
         }
         let task = session.webSocketTask(with: request)
         socket = task
         task.resume()
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            task.sendPing { error in
+                if let error { continuation.resume(throwing: error) }
+                else { continuation.resume() }
+            }
+        }
+        guard socket === task else { throw ClientError("长连接已取消") }
+        httpMode = false
         connected = true
-        status = "已连接 · \(computer)"
+        status = "已连接 · \(computer) · WebSocket"
         quality(selectedQuality)
         receiver = Task { [weak self] in await self?.receiveLoop(task) }
         heartbeat = Task { [weak self] in await self?.heartbeatLoop(task) }
+    }
+
+    private func startHTTPMode(session: URLSession, address: URL) {
+        socket?.cancel(with: .goingAway, reason: nil)
+        socket = nil
+        httpMode = true
+        connected = true
+        status = "已连接 · \(computer) · 兼容模式"
+        frameTask?.cancel()
+        frameTask = Task { [weak self] in await self?.httpFrameLoop(session: session, address: address) }
+    }
+
+    private func httpFrameLoop(session: URLSession, address: URL) async {
+        var failures = 0
+        while !Task.isCancelled, connected, httpMode {
+            do {
+                var request = URLRequest(url: address.appendingPathComponent("frame"))
+                request.timeoutInterval = 8
+                request.setValue(selectedQuality == 2 ? "smooth" : "text", forHTTPHeaderField: "X-TailDesk-Quality")
+                let started = Date()
+                let (data, response) = try await session.data(for: request)
+                guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                      data.count <= 8 * 1024 * 1024, let image = UIImage(data: data) else {
+                    throw ClientError("兼容模式画面响应无效")
+                }
+                frame = image
+                failures = 0
+                rtt = max(0, Int(Date().timeIntervalSince(started) * 1000))
+                status = "已连接 · \(computer) · 兼容模式 · \(rtt) ms"
+                try await Task.sleep(nanoseconds: 35_000_000)
+            } catch {
+                if Task.isCancelled { return }
+                failures += 1
+                status = "网络波动（\(failures)/5）：\(error.localizedDescription)"
+                if failures >= 5 {
+                    connected = false
+                    status = "连接已中断：\(error.localizedDescription)"
+                    return
+                }
+                try? await Task.sleep(nanoseconds: UInt64(failures) * 500_000_000)
+            }
+        }
     }
 
     private func receiveLoop(_ task: URLSessionWebSocketTask) async {
@@ -129,6 +199,13 @@ final class RemoteClient: ObservableObject {
         send(["type": "mouse", "x": pointerX, "y": pointerY, "action": action, "wheel": wheel])
     }
 
+    func movePointer(dx: CGFloat, dy: CGFloat) {
+        let speed = max(abs(dx), abs(dy)) > 10 ? 220.0 : 125.0
+        pointerX = min(65535, max(0, pointerX + Int(dx * speed)))
+        pointerY = min(65535, max(0, pointerY + Int(dy * speed)))
+        send(["type": "mouse", "x": pointerX, "y": pointerY, "action": 0, "wheel": 0])
+    }
+
     func click(x: Int, y: Int, right: Bool = false) {
         mouse(x: x, y: y, action: right ? 3 : 1)
         mouse(x: x, y: y, action: right ? 4 : 2)
@@ -156,12 +233,49 @@ final class RemoteClient: ObservableObject {
     func release() { send(["type": "release"]) }
 
     private func send(_ object: [String: Any]) {
-        guard connected, let socket,
-              let data = try? JSONSerialization.data(withJSONObject: object),
+        guard connected else { return }
+        if httpMode {
+            if httpQueue.count >= 96 { httpQueue.removeAll(); httpQueue.append(["type": "release"]) }
+            httpQueue.append(object)
+            scheduleHTTPFlush()
+            return
+        }
+        guard let socket, let data = try? JSONSerialization.data(withJSONObject: object),
               let text = String(data: data, encoding: .utf8) else { return }
         socket.send(.string(text)) { [weak self] error in
             if let error { Task { @MainActor in self?.connectionEnded(error.localizedDescription) } }
         }
+    }
+
+    private func scheduleHTTPFlush() {
+        guard httpFlushTask == nil else { return }
+        httpFlushTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 16_000_000)
+            await self?.flushHTTPQueue()
+        }
+    }
+
+    private func flushHTTPQueue() async {
+        httpFlushTask = nil
+        guard connected, httpMode, let address = baseURL, let currentSession = session, !httpQueue.isEmpty else { return }
+        let count = min(32, httpQueue.count)
+        let events = Array(httpQueue.prefix(count))
+        httpQueue.removeFirst(count)
+        let body: [String: Any] = events.count == 1 ? events[0] : ["type": "batch", "events": events]
+        do {
+            var request = URLRequest(url: address.appendingPathComponent("input"))
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue(csrf, forHTTPHeaderField: "X-TailDesk-CSRF")
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            let (data, response) = try await currentSession.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                throw ClientError(Self.serverError(data, fallback: "输入发送失败"))
+            }
+        } catch {
+            status = "输入发送失败：\(error.localizedDescription)"
+        }
+        if !httpQueue.isEmpty { scheduleHTTPFlush() }
     }
 
     func disconnect(logout: Bool = true) {
@@ -170,9 +284,10 @@ final class RemoteClient: ObservableObject {
         let address = baseURL
         let currentSession = session
         let token = csrf
-        receiver?.cancel(); heartbeat?.cancel(); reconnectTask?.cancel()
+        receiver?.cancel(); heartbeat?.cancel(); reconnectTask?.cancel(); frameTask?.cancel(); httpFlushTask?.cancel()
         socket?.cancel(with: .normalClosure, reason: nil)
-        socket = nil; receiver = nil; heartbeat = nil; reconnectTask = nil
+        socket = nil; receiver = nil; heartbeat = nil; reconnectTask = nil; frameTask = nil; httpFlushTask = nil
+        httpQueue.removeAll(); httpMode = false
         connected = false; frame = nil
         if logout, let address, let currentSession, !token.isEmpty {
             Task {
@@ -200,8 +315,8 @@ final class RemoteClient: ObservableObject {
         reconnectTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000_000)
             guard let self, !Task.isCancelled, !self.manualDisconnect, !self.connected else { return }
-            do { try self.openSocket(session: currentSession, address: address) }
-            catch { self.connectionEnded(error.localizedDescription) }
+            do { try await self.openSocket(session: currentSession, address: address) }
+            catch { self.startHTTPMode(session: currentSession, address: address) }
         }
     }
 

@@ -26,6 +26,7 @@ struct RemoteScreenView: UIViewRepresentable {
         view.client = client
         view.image = client.frame
         view.mode = mode
+        view.pointer = CGPoint(x: client.pointerX, y: client.pointerY)
         if abs(view.zoom - zoom) > 0.005 { view.setZoom(zoom) }
         if context.coordinator.lastCommand != command {
             context.coordinator.lastCommand = command
