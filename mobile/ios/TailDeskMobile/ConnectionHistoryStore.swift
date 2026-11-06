@@ -5,6 +5,7 @@ struct SavedConnection: Codable, Identifiable, Hashable {
     let id: UUID
     var endpoint: String
     var computer: String
+    var macAddress: String? = nil
     var lastConnectedAt: Date
 
     var title: String {
@@ -27,13 +28,15 @@ final class ConnectionHistoryStore: ObservableObject {
         }
     }
 
-    func save(endpoint: String, computer: String, password: String) {
+    func save(endpoint: String, computer: String, password: String, macAddress: String) {
         let address = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !address.isEmpty, !password.isEmpty else { return }
         var entry = entries.first(where: { $0.endpoint.caseInsensitiveCompare(address) == .orderedSame })
-            ?? SavedConnection(id: UUID(), endpoint: address, computer: computer, lastConnectedAt: Date())
+            ?? SavedConnection(id: UUID(), endpoint: address, computer: computer, macAddress: nil, lastConnectedAt: Date())
         entry.endpoint = address
         entry.computer = computer
+        let mac = macAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        entry.macAddress = mac.isEmpty ? entry.macAddress : mac
         entry.lastConnectedAt = Date()
         entries.removeAll { $0.id == entry.id || $0.endpoint.caseInsensitiveCompare(address) == .orderedSame }
         entries.insert(entry, at: 0)

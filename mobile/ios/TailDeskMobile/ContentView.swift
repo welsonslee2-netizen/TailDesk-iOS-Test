@@ -5,6 +5,7 @@ struct ContentView: View {
     @EnvironmentObject private var history: ConnectionHistoryStore
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("lastEndpoint") private var endpoint = ""
+    @AppStorage("lastMacAddress") private var macAddress = ""
     @State private var password = ""
     @State private var connecting = false
     @State private var mode: ControlMode = .pad
@@ -17,7 +18,7 @@ struct ContentView: View {
     @State private var isFullscreen = false
     @FocusState private var loginField: LoginField?
 
-    private enum LoginField: Hashable { case endpoint, password }
+    private enum LoginField: Hashable { case endpoint, mac, password }
 
     var body: some View {
         Group {
@@ -75,6 +76,19 @@ struct ContentView: View {
                     }
 
                     VStack(alignment: .leading, spacing: 8) {
+                        Label("网卡 MAC（用于局域网唤醒）", systemImage: "power")
+                            .font(.headline)
+                        TextField("例如 AA:BB:CC:DD:EE:FF", text: $macAddress)
+                            .textInputAutocapitalization(.characters)
+                            .keyboardType(.asciiCapable)
+                            .submitLabel(.next)
+                            .focused($loginField, equals: .mac)
+                            .onSubmit { loginField = .password }
+                            .textFieldStyle(.roundedBorder)
+                            .id(LoginField.mac)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
                         Label("无人值守密码", systemImage: "lock")
                             .font(.headline)
                         SecureField("电脑端设置的 12–128 位密码", text: $password)
@@ -86,16 +100,25 @@ struct ContentView: View {
                             .id(LoginField.password)
                     }
 
-                    Button(action: beginConnection) {
-                        HStack {
-                            if connecting { ProgressView() }
-                            Text(connecting ? "正在验证并连接" : "连接电脑")
-                                .frame(maxWidth: .infinity)
+                    HStack(spacing: 10) {
+                        Button(action: beginConnection) {
+                            HStack {
+                                if connecting { ProgressView() }
+                                Text(connecting ? "正在连接" : "连接电脑")
+                                    .frame(maxWidth: .infinity)
+                            }
                         }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .disabled(connecting || endpoint.trimmingCharacters(in: .whitespaces).isEmpty || password.isEmpty)
+
+                        Button(action: wakeComputer) {
+                            Label("唤醒", systemImage: "power")
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.large)
+                        .disabled(macAddress.trimmingCharacters(in: .whitespaces).isEmpty)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .disabled(connecting || endpoint.trimmingCharacters(in: .whitespaces).isEmpty || password.isEmpty)
 
                     HStack(alignment: .top, spacing: 8) {
                         Image(systemName: statusIcon)
@@ -109,7 +132,7 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
 
-                    Text("确保 iPhone 与电脑都已连接同一 Tailnet；手机端口通常是电脑端口 + 1。")
+                    Text("唤醒功能要求 iPhone 与电脑位于同一局域网，且电脑 BIOS/网卡已开启 Wake-on-LAN。唤醒后等待 Tailscale 上线再连接。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     Spacer(minLength: 30)
@@ -150,7 +173,7 @@ struct ContentView: View {
             await client.connect(endpoint: endpoint, password: submittedPassword)
             connecting = false
             if client.connected {
-                history.save(endpoint: endpoint, computer: client.computer, password: submittedPassword)
+                history.save(endpoint: endpoint, computer: client.computer, password: submittedPassword, macAddress: macAddress)
                 password = ""
             }
         }
@@ -158,8 +181,19 @@ struct ContentView: View {
 
     private func selectHistory(_ entry: SavedConnection) {
         endpoint = entry.endpoint
+        macAddress = entry.macAddress ?? ""
         password = history.password(for: entry)
         loginField = password.isEmpty ? .password : nil
+    }
+
+    private func wakeComputer() {
+        loginField = nil
+        do {
+            try WakeOnLAN.send(macAddress: macAddress)
+            client.status = "已向局域网发送 Wake-on-LAN 魔术包，请等待电脑和 Tailscale 上线"
+        } catch {
+            client.status = "唤醒失败：\(error.localizedDescription)"
+        }
     }
 
     private var remoteView: some View {
