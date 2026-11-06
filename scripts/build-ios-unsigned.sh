@@ -31,7 +31,12 @@ test -d "$APP_PATH"
 test -x "$APP_PATH/TailDesk"
 /usr/bin/plutil -lint "$APP_PATH/Info.plist"
 /usr/bin/plutil -extract CFBundleIdentifier raw "$APP_PATH/Info.plist" | grep -Fx 'com.taildesk.mobile'
+/usr/bin/plutil -extract CFBundleDisplayName raw "$APP_PATH/Info.plist" | grep -Fx 'TailDesk'
+/usr/bin/plutil -extract CFBundleExecutable raw "$APP_PATH/Info.plist" | grep -Fx 'TailDesk'
+/usr/bin/plutil -extract CFBundlePackageType raw "$APP_PATH/Info.plist" | grep -Fx 'APPL'
 /usr/bin/plutil -extract MinimumOSVersion raw "$APP_PATH/Info.plist" | grep -Fx '16.0'
+/usr/bin/plutil -extract NSLocalNetworkUsageDescription raw "$APP_PATH/Info.plist" | grep -F 'Tailscale'
+/usr/bin/plutil -extract NSAppTransportSecurity.NSAllowsArbitraryLoads raw "$APP_PATH/Info.plist" | grep -Fx 'true'
 /usr/bin/lipo -info "$APP_PATH/TailDesk"
 
 cp -R "$APP_PATH" "$PAYLOAD_DIR/"

@@ -13,10 +13,10 @@ targets:
     platform: iOS
     sources:
       - TailDeskMobile
-    info:
-      path: TailDeskMobile/Info.plist
     settings:
       base:
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: TailDeskMobile/Info.plist
         PRODUCT_BUNDLE_IDENTIFIER: com.taildesk.mobile
         PRODUCT_NAME: TailDesk
         CODE_SIGN_STYLE: Automatic
