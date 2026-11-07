@@ -24,6 +24,7 @@ final class RemoteClient: ObservableObject {
     private var moveFlushTask: Task<Void, Never>?
     private var httpQueue = [[String: Any]]()
     private var pendingFrameData: Data?
+    private weak var pendingFrameSocket: URLSessionWebSocketTask?
     private var pendingMove: [String: Any]?
     private var httpMode = false
     private var lastPing = Date()
@@ -176,7 +177,7 @@ final class RemoteClient: ObservableObject {
                 switch message {
                 case .data(let data):
                     guard data.count <= 8 * 1024 * 1024 else { throw ClientError("远程画面数据过大") }
-                    enqueueFrame(data)
+                    enqueueFrame(data, from: task)
                     retryCount = 0
                 case .string(let text):
                     if let data = text.data(using: .utf8),
@@ -304,15 +305,18 @@ final class RemoteClient: ObservableObject {
         send(event)
     }
 
-    private func enqueueFrame(_ data: Data) {
+    private func enqueueFrame(_ data: Data, from task: URLSessionWebSocketTask) {
         pendingFrameData = data
+        pendingFrameSocket = task
         guard decoderTask == nil else { return }
         decoderTask = Task { [weak self] in await self?.decodePendingFrames() }
     }
 
     private func decodePendingFrames() async {
         while !Task.isCancelled, let data = pendingFrameData {
+            let sourceSocket = pendingFrameSocket
             pendingFrameData = nil
+            pendingFrameSocket = nil
             if let image = await Self.decodeImage(data) {
                 frame = image
                 decodeFailures = 0
@@ -321,10 +325,14 @@ final class RemoteClient: ObservableObject {
                 status = "画面帧不完整，已丢弃并请求下一帧（\(decodeFailures)）"
                 if decodeFailures == 2 { sendQuality(2) }
             }
-            send(["type": "ack"])
+            if let sourceSocket, socket === sourceSocket, connected, !httpMode {
+                send(["type": "ack"])
+            }
         }
         decoderTask = nil
-        if pendingFrameData != nil { enqueueFrame(pendingFrameData!) }
+        if let data = pendingFrameData, let sourceSocket = pendingFrameSocket {
+            enqueueFrame(data, from: sourceSocket)
+        }
     }
 
     nonisolated private static func decodeImage(_ data: Data) async -> UIImage? {
@@ -407,7 +415,7 @@ final class RemoteClient: ObservableObject {
         receiver?.cancel(); heartbeat?.cancel(); reconnectTask?.cancel(); frameTask?.cancel(); decoderTask?.cancel(); httpFlushTask?.cancel(); moveFlushTask?.cancel()
         socket?.cancel(with: .normalClosure, reason: nil)
         socket = nil; receiver = nil; heartbeat = nil; reconnectTask = nil; frameTask = nil; decoderTask = nil; httpFlushTask = nil; moveFlushTask = nil
-        httpQueue.removeAll(); pendingFrameData = nil; pendingMove = nil; httpMode = false
+        httpQueue.removeAll(); pendingFrameData = nil; pendingFrameSocket = nil; pendingMove = nil; httpMode = false
         supportsCursorMode = false; decodeFailures = 0
         connected = false; frame = nil
         if logout, let address, let currentSession, !token.isEmpty {
