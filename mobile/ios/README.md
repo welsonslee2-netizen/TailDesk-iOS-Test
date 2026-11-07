@@ -1,4 +1,4 @@
-# TailDesk iOS 0.13
+# TailDesk iOS 0.14
 
 原生 SwiftUI/UIKit 客户端，连接电脑端显示的 `EasyTier / Tailscale / 局域网 IPv4:手机端口`。
 
@@ -11,6 +11,8 @@
 5. 选择真机后运行，或用 Product > Archive 导出签名 App。
 
 当前版本要求 iOS 16+。HTTP/WebSocket 只允许 App 内部校验通过的私有 IPv4、Tailscale CGNAT IPv4 或回环地址，不应把电脑端口转发到公网。
+
+0.14 将 WebSocket 帧确认延后到图片完整解码之后，限制待解码帧数量并对超大画面降采样，修复连续控制时偶发的“解码请求处理失败”。触屏/浏览模式隐藏手机本地指针并显示被控 Windows 的真实鼠标；鼠标模式显示本地低延迟指针和类似 ToDesk 的虚拟触控板、左右键、拖动锁定及滚轮。
 
 0.13 新增国内 P2P 配置导入页。Windows TailDesk 可复制 `TDNET1` 配置，iOS 导入后逐项复制到 EasyTier iOS，并自动填写电脑虚拟 IP连接地址。系统虚拟网卡依赖 Apple Network Extension entitlement，免费 AltServer 签名通常仍需单独的 EasyTier iOS App。
 

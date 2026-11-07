@@ -6,21 +6,20 @@ struct VirtualMousePad: View {
     @State private var previousTranslation = CGSize.zero
 
     var body: some View {
-        HStack(spacing: 10) {
-            GeometryReader { _ in
+        HStack(spacing: 8) {
+            VStack(spacing: 0) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 14)
-                        .fill(Color.white.opacity(0.08))
-                    RoundedRectangle(cornerRadius: 14)
-                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                    VStack(spacing: 5) {
+                    RoundedRectangle(cornerRadius: 15, style: .continuous)
+                        .fill(LinearGradient(colors: [Color.white.opacity(0.14), Color.white.opacity(0.06)],
+                                             startPoint: .top, endPoint: .bottom))
+                    RoundedRectangle(cornerRadius: 15, style: .continuous)
+                        .stroke(Color.white.opacity(0.24), lineWidth: 1)
+                    HStack(spacing: 8) {
                         Image(systemName: "cursorarrow.motionlines")
-                            .font(.title2)
-                        Text("虚拟鼠标 · 滑动移动 · 轻点左键")
+                        Text(dragLocked ? "拖动锁定中" : "滑动移动 · 轻点单击")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .minimumScaleFactor(0.75)
                     }
+                    .foregroundStyle(dragLocked ? Color.orange : Color.secondary)
                 }
                 .contentShape(Rectangle())
                 .gesture(
@@ -39,30 +38,46 @@ struct VirtualMousePad: View {
                         }
                 )
                 .accessibilityLabel("虚拟鼠标触控板")
-            }
-            .frame(minWidth: 170, minHeight: 86)
+                .frame(minHeight: 62)
 
-            VStack(spacing: 7) {
-                HStack(spacing: 7) {
-                    compactButton("左键") { client.clickCurrent() }
-                    compactButton("右键") { client.clickCurrent(right: true) }
+                HStack(spacing: 1) {
+                    mouseButton("左键", system: "computermouse", prominent: true) { client.clickCurrent() }
+                    mouseButton("右键", system: "contextualmenu.and.cursorarrow") { client.clickCurrent(right: true) }
                 }
-                HStack(spacing: 7) {
-                    compactButton(dragLocked ? "松开" : "拖动") {
-                        dragLocked.toggle()
-                        client.leftButton(down: dragLocked)
-                    }
-                    compactButton("滚动") { client.scroll(-120) }
+                .frame(height: 38)
+            }
+
+            VStack(spacing: 6) {
+                mouseButton(dragLocked ? "松开" : "拖动", system: dragLocked ? "lock.open" : "hand.draw") {
+                    dragLocked.toggle()
+                    client.leftButton(down: dragLocked)
+                }
+                HStack(spacing: 5) {
+                    squareButton("chevron.up") { client.scroll(120) }
+                    squareButton("chevron.down") { client.scroll(-120) }
                 }
             }
+            .frame(width: 92)
         }
-        .padding(8)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
     }
 
-    private func compactButton(_ title: String, action: @escaping () -> Void) -> some View {
-        Button(title, action: action)
-            .buttonStyle(.bordered)
-            .font(.caption)
-            .frame(minWidth: 48, minHeight: 34)
+    private func mouseButton(_ title: String, system: String, prominent: Bool = false,
+                             action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: system)
+                .font(.caption2.weight(.medium))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .buttonStyle(.bordered)
+        .tint(prominent ? .accentColor : .gray)
+    }
+
+    private func squareButton(_ system: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: system).frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .buttonStyle(.bordered)
     }
 }

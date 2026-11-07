@@ -2,9 +2,9 @@ import SwiftUI
 import UIKit
 
 enum ControlMode: String, CaseIterable, Identifiable {
-    case pad = "触控板"
-    case touch = "直触"
-    case view = "浏览"
+    case pad = "鼠标模式"
+    case touch = "触屏模式"
+    case view = "浏览模式"
     var id: String { rawValue }
 }
 
@@ -45,7 +45,7 @@ final class RemoteCanvas: UIView, UIGestureRecognizerDelegate {
     var mode: ControlMode = .pad { didSet { setNeedsDisplay() } }
     var zoom: CGFloat = 1
     var offset = CGPoint.zero
-    var pointer = CGPoint(x: 32768, y: 32768)
+    var pointer = CGPoint(x: 32768, y: 32768) { didSet { setNeedsDisplay() } }
     var onZoom: ((CGFloat) -> Void)?
     private var draggingDirect = false
     private var lastSize = CGSize.zero
@@ -81,7 +81,7 @@ final class RemoteCanvas: UIView, UIGestureRecognizerDelegate {
         context.interpolationQuality = zoom > 1.4 ? .none : .high
         let target = imageRect()
         image.draw(in: target)
-        guard mode != .view else { return }
+        guard mode == .pad else { return }
         let point = CGPoint(x: target.minX + target.width * pointer.x / 65535,
                             y: target.minY + target.height * pointer.y / 65535)
         context.saveGState()

@@ -33,6 +33,17 @@ struct ContentView: View {
         }
         .onChange(of: client.connected) { connected in
             if !connected, isFullscreen { leaveFullscreen() }
+            if connected { client.controlMode(mode) }
+        }
+        .onChange(of: mode) { selected in
+            dragLocked = false
+            client.release()
+            client.controlMode(selected)
+            if selected == .pad {
+                if !isFullscreen { showMousePad = true }
+            } else {
+                showMousePad = false
+            }
         }
     }
 
@@ -226,7 +237,7 @@ struct ContentView: View {
                     Picker("控制方式", selection: $mode) {
                         ForEach(ControlMode.allCases) { Text($0.rawValue).tag($0) }
                     }
-                    Button(showMousePad ? "隐藏虚拟鼠标" : "显示虚拟鼠标") { showMousePad.toggle() }
+                    Button(showMousePad ? "隐藏虚拟鼠标" : "显示虚拟鼠标") { toggleMousePad() }
                 } label: {
                     Label("控制", systemImage: "cursorarrow.motionlines")
                 }
@@ -257,7 +268,7 @@ struct ContentView: View {
                 if isFullscreen {
                     HStack(spacing: 8) {
                         floatingButton("keyboard", label: "键盘") { keyboardToken += 1 }
-                        floatingButton("cursorarrow.motionlines", label: "虚拟鼠标") { showMousePad.toggle() }
+                        floatingButton("cursorarrow.motionlines", label: "虚拟鼠标") { toggleMousePad() }
                         floatingButton("arrow.down.right.and.arrow.up.left", label: "退出全屏") { leaveFullscreen() }
                     }
                     .padding(.trailing, 8)
@@ -276,7 +287,7 @@ struct ContentView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     toolButton("键盘", system: "keyboard") { keyboardToken += 1 }
-                    toolButton("鼠标", system: "cursorarrow") { showMousePad.toggle() }
+                    toolButton("鼠标", system: "cursorarrow") { toggleMousePad() }
                     toolButton("−", system: nil) { zoom = max(0.25, zoom / 1.25) }
                     toolButton("＋", system: nil) { zoom = min(8, zoom * 1.25) }
                     toolButton("适应", system: "arrow.up.left.and.arrow.down.right") { nextScreenCommand(fit: true) }
@@ -306,6 +317,15 @@ struct ContentView: View {
         isFullscreen = true
         nextScreenCommand(fit: true)
         OrientationManager.requestLandscape()
+    }
+
+    private func toggleMousePad() {
+        if mode != .pad {
+            mode = .pad
+            showMousePad = true
+        } else {
+            showMousePad.toggle()
+        }
     }
 
     private func leaveFullscreen() {

@@ -29,11 +29,19 @@ final class RemoteClient: ObservableObject {
     private var lastPing = Date()
     private var selectedQuality = -1
     private var retryCount = 0
+    private var decodeFailures = 0
     private var manualDisconnect = false
+    private var supportsCursorMode = false
+    private var requestedCursorMode = "virtual"
     @Published private(set) var pointerX = 32768
     @Published private(set) var pointerY = 32768
 
-    private struct LoginReply: Decodable { let csrf: String; let computer: String; let mac: String? }
+    private struct LoginReply: Decodable {
+        let csrf: String
+        let computer: String
+        let mac: String?
+        let features: [String]?
+    }
     private struct ErrorReply: Decodable { let error: String }
 
     func connect(endpoint: String, password: String) async {
@@ -63,6 +71,7 @@ final class RemoteClient: ObservableObject {
             csrf = login.csrf
             computer = login.computer
             computerMac = login.mac ?? ""
+            supportsCursorMode = login.features?.contains("cursor-mode-v1") == true
             try await verifySession(session: currentSession, address: address)
             do {
                 try await openSocket(session: currentSession, address: address)
@@ -95,6 +104,7 @@ final class RemoteClient: ObservableObject {
             request.setValue(fields["Cookie"], forHTTPHeaderField: "Cookie")
         }
         let task = session.webSocketTask(with: request)
+        task.maximumMessageSize = 8 * 1024 * 1024
         socket = task
         task.resume()
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -108,6 +118,7 @@ final class RemoteClient: ObservableObject {
         connected = true
         status = "已连接 · \(computer) · WebSocket"
         quality(selectedQuality)
+        sendCursorMode()
         receiver = Task { [weak self] in await self?.receiveLoop(task) }
         heartbeat = Task { [weak self] in await self?.heartbeatLoop(task) }
     }
@@ -118,6 +129,7 @@ final class RemoteClient: ObservableObject {
         httpMode = true
         connected = true
         status = "已连接 · \(computer) · 兼容模式"
+        sendCursorMode()
         frameTask?.cancel()
         frameTask = Task { [weak self] in await self?.httpFrameLoop(session: session, address: address) }
     }
@@ -132,11 +144,13 @@ final class RemoteClient: ObservableObject {
                 let started = Date()
                 let (data, response) = try await session.data(for: request)
                 guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                      ["image/jpeg", "image/png"].contains(http.value(forHTTPHeaderField: "Content-Type")?.split(separator: ";").first.map(String.init) ?? ""),
                       data.count <= 8 * 1024 * 1024,
                       let image = await Self.decodeImage(data) else {
                     throw ClientError("兼容模式画面响应无效")
                 }
                 frame = image
+                decodeFailures = 0
                 failures = 0
                 rtt = max(0, Int(Date().timeIntervalSince(started) * 1000))
                 status = "已连接 · \(computer) · 兼容模式 · \(rtt) ms"
@@ -164,7 +178,6 @@ final class RemoteClient: ObservableObject {
                     guard data.count <= 8 * 1024 * 1024 else { throw ClientError("远程画面数据过大") }
                     enqueueFrame(data)
                     retryCount = 0
-                    send(["type": "ack"])
                 case .string(let text):
                     if let data = text.data(using: .utf8),
                        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -204,6 +217,16 @@ final class RemoteClient: ObservableObject {
     }
 
     private func sendQuality(_ mode: Int) { send(["type": "quality", "mode": mode]) }
+
+    func controlMode(_ mode: ControlMode) {
+        requestedCursorMode = mode == .pad ? "virtual" : "host"
+        sendCursorMode()
+    }
+
+    private func sendCursorMode() {
+        guard supportsCursorMode else { return }
+        send(["type": "cursor", "mode": requestedCursorMode])
+    }
 
     func mouse(x: Int, y: Int, action: Int, wheel: Int = 0) {
         pointerX = min(65535, max(0, x)); pointerY = min(65535, max(0, y))
@@ -290,7 +313,15 @@ final class RemoteClient: ObservableObject {
     private func decodePendingFrames() async {
         while !Task.isCancelled, let data = pendingFrameData {
             pendingFrameData = nil
-            if let image = await Self.decodeImage(data) { frame = image }
+            if let image = await Self.decodeImage(data) {
+                frame = image
+                decodeFailures = 0
+            } else {
+                decodeFailures += 1
+                status = "画面帧不完整，已丢弃并请求下一帧（\(decodeFailures)）"
+                if decodeFailures == 2 { sendQuality(2) }
+            }
+            send(["type": "ack"])
         }
         decoderTask = nil
         if pendingFrameData != nil { enqueueFrame(pendingFrameData!) }
@@ -301,6 +332,7 @@ final class RemoteClient: ObservableObject {
             DispatchQueue.global(qos: .userInteractive).async {
                 autoreleasepool {
                     guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+                          CGImageSourceGetStatus(source) == .statusComplete,
                           let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
                           let width = properties[kCGImagePropertyPixelWidth] as? Int,
                           let height = properties[kCGImagePropertyPixelHeight] as? Int,
@@ -308,11 +340,24 @@ final class RemoteClient: ObservableObject {
                         continuation.resume(returning: nil)
                         return
                     }
-                    let options: [CFString: Any] = [
-                        kCGImageSourceShouldCache: true,
-                        kCGImageSourceShouldCacheImmediately: true
-                    ]
-                    guard let image = CGImageSourceCreateImageAtIndex(source, 0, options as CFDictionary) else {
+                    let maxPixel = 3072
+                    let image: CGImage?
+                    if max(width, height) > maxPixel {
+                        let options: [CFString: Any] = [
+                            kCGImageSourceCreateThumbnailFromImageAlways: true,
+                            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+                            kCGImageSourceCreateThumbnailWithTransform: true,
+                            kCGImageSourceShouldCacheImmediately: true
+                        ]
+                        image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+                    } else {
+                        let options: [CFString: Any] = [
+                            kCGImageSourceShouldCache: true,
+                            kCGImageSourceShouldCacheImmediately: true
+                        ]
+                        image = CGImageSourceCreateImageAtIndex(source, 0, options as CFDictionary)
+                    }
+                    guard let image else {
                         continuation.resume(returning: nil)
                         return
                     }
@@ -363,6 +408,7 @@ final class RemoteClient: ObservableObject {
         socket?.cancel(with: .normalClosure, reason: nil)
         socket = nil; receiver = nil; heartbeat = nil; reconnectTask = nil; frameTask = nil; decoderTask = nil; httpFlushTask = nil; moveFlushTask = nil
         httpQueue.removeAll(); pendingFrameData = nil; pendingMove = nil; httpMode = false
+        supportsCursorMode = false; decodeFailures = 0
         connected = false; frame = nil
         if logout, let address, let currentSession, !token.isEmpty {
             Task {
