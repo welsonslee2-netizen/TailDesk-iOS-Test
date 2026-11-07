@@ -400,12 +400,16 @@ final class RemoteClient: ObservableObject {
         let full = raw.contains(":") ? raw : raw + ":59011"
         let pieces = full.split(separator: ":", omittingEmptySubsequences: false)
         guard pieces.count == 2, let port = Int(pieces[1]), (1024...65535).contains(port) else {
-            throw ClientError("请输入 Tailscale IPv4:端口，例如 100.101.102.103:59011")
+            throw ClientError("请输入 Tailscale 或局域网 IPv4:端口，例如 192.168.1.20:59011")
         }
         let octets = pieces[0].split(separator: ".").compactMap { Int($0) }
+        let isTail = octets.count == 4 && octets[0] == 100 && (64...127).contains(octets[1])
+        let isPrivate = octets.count == 4 && (octets[0] == 10 ||
+            (octets[0] == 172 && (16...31).contains(octets[1])) ||
+            (octets[0] == 192 && octets[1] == 168))
         guard octets.count == 4, octets.allSatisfy({ (0...255).contains($0) }),
-              (octets[0] == 127 || (octets[0] == 100 && (64...127).contains(octets[1]))) else {
-            throw ClientError("仅连接 Tailscale IPv4 或 127.0.0.1")
+              octets[0] == 127 || isTail || isPrivate else {
+            throw ClientError("仅连接 Tailscale、局域网 IPv4 或 127.0.0.1")
         }
         return URL(string: "http://\(pieces[0]):\(port)/")!
     }

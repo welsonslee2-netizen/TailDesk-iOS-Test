@@ -43,7 +43,7 @@ struct ContentView: View {
                     Text("TailDesk")
                         .font(.system(size: 48, weight: .bold, design: .rounded))
                         .minimumScaleFactor(0.75)
-                    Text("通过 Tailscale 安全连接自己的电脑")
+                    Text("局域网优先直连，外网可使用 Tailscale")
                         .font(.body)
                         .foregroundStyle(.secondary)
 
@@ -64,7 +64,7 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Label("电脑地址", systemImage: "desktopcomputer")
                             .font(.headline)
-                        TextField("例如 100.119.102.126:59011", text: $endpoint)
+                        TextField("例如 192.168.1.20:59011", text: $endpoint)
                             .textInputAutocapitalization(.never)
                             .keyboardType(.numbersAndPunctuation)
                             .textContentType(.URL)
