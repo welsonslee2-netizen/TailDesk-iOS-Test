@@ -100,25 +100,16 @@ struct ContentView: View {
                             .id(LoginField.password)
                     }
 
-                    HStack(spacing: 10) {
-                        Button(action: beginConnection) {
-                            HStack {
-                                if connecting { ProgressView() }
-                                Text(connecting ? "正在连接" : "连接电脑")
-                                    .frame(maxWidth: .infinity)
-                            }
+                    Button(action: beginConnection) {
+                        HStack {
+                            if connecting { ProgressView() }
+                            Text(connecting ? "正在唤醒并连接" : "连接电脑")
+                                .frame(maxWidth: .infinity)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.large)
-                        .disabled(connecting || endpoint.trimmingCharacters(in: .whitespaces).isEmpty || password.isEmpty)
-
-                        Button(action: wakeComputer) {
-                            Label("唤醒", systemImage: "power")
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.large)
-                        .disabled(macAddress.trimmingCharacters(in: .whitespaces).isEmpty)
                     }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(connecting || endpoint.trimmingCharacters(in: .whitespaces).isEmpty || password.isEmpty)
 
                     HStack(alignment: .top, spacing: 8) {
                         Image(systemName: statusIcon)
@@ -132,7 +123,7 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
 
-                    Text("唤醒功能要求 iPhone 与电脑位于同一局域网，且电脑 BIOS/网卡已开启 Wake-on-LAN。唤醒后等待 Tailscale 上线再连接。")
+                    Text("点击“连接电脑”时会自动发送一次局域网唤醒包并等待电脑上线，无需反复点击。要求 iPhone 与电脑位于同一局域网，且电脑 BIOS/网卡已开启 Wake-on-LAN。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     Spacer(minLength: 30)
@@ -169,12 +160,35 @@ struct ContentView: View {
         loginField = nil
         connecting = true
         let submittedPassword = password
+        let submittedEndpoint = endpoint
+        let submittedMac = macAddress.trimmingCharacters(in: .whitespacesAndNewlines)
         Task {
-            await client.connect(endpoint: endpoint, password: submittedPassword)
+            var wakeSent = false
+            if !submittedMac.isEmpty {
+                do {
+                    try WakeOnLAN.send(macAddress: submittedMac)
+                    wakeSent = true
+                    client.status = "已发送唤醒包，正在等待电脑和 Tailscale 上线…"
+                } catch {
+                    client.status = "唤醒包发送失败，继续尝试直接连接：\(error.localizedDescription)"
+                }
+            }
+            let maximumAttempts = wakeSent ? 7 : 1
+            for attempt in 1...maximumAttempts {
+                if Task.isCancelled { break }
+                if attempt > 1 {
+                    client.status = "电脑正在启动，自动重试连接（\(attempt)/\(maximumAttempts)）…"
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                }
+                await client.connect(endpoint: submittedEndpoint, password: submittedPassword)
+                if client.connected { break }
+            }
             connecting = false
             if client.connected {
-                history.save(endpoint: endpoint, computer: client.computer, password: submittedPassword, macAddress: macAddress)
+                history.save(endpoint: submittedEndpoint, computer: client.computer, password: submittedPassword, macAddress: submittedMac)
                 password = ""
+            } else if wakeSent {
+                client.status = "已发送唤醒包，但电脑尚未上线。请检查有线网卡、BIOS Wake-on-LAN 和局域网条件。"
             }
         }
     }
@@ -184,16 +198,6 @@ struct ContentView: View {
         macAddress = entry.macAddress ?? ""
         password = history.password(for: entry)
         loginField = password.isEmpty ? .password : nil
-    }
-
-    private func wakeComputer() {
-        loginField = nil
-        do {
-            try WakeOnLAN.send(macAddress: macAddress)
-            client.status = "已向局域网发送 Wake-on-LAN 魔术包，请等待电脑和 Tailscale 上线"
-        } catch {
-            client.status = "唤醒失败：\(error.localizedDescription)"
-        }
     }
 
     private var remoteView: some View {
