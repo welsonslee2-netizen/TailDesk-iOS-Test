@@ -16,6 +16,7 @@ struct ContentView: View {
     @State private var quality = -1
     @State private var showMousePad = true
     @State private var isFullscreen = false
+    @State private var showNetworkSetup = false
     @FocusState private var loginField: LoginField?
 
     private enum LoginField: Hashable { case endpoint, mac, password }
@@ -43,7 +44,7 @@ struct ContentView: View {
                     Text("TailDesk")
                         .font(.system(size: 48, weight: .bold, design: .rounded))
                         .minimumScaleFactor(0.75)
-                    Text("局域网优先直连，外网可使用 Tailscale")
+                    Text("局域网优先直连，外网支持 EasyTier 国内 P2P / Tailscale")
                         .font(.body)
                         .foregroundStyle(.secondary)
 
@@ -60,6 +61,12 @@ struct ContentView: View {
                         }
                         .buttonStyle(.bordered)
                     }
+
+                    Button { showNetworkSetup = true } label: {
+                        Label("国内 P2P 配置", systemImage: "network")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.bordered)
 
                     VStack(alignment: .leading, spacing: 8) {
                         Label("电脑地址", systemImage: "desktopcomputer")
@@ -142,6 +149,9 @@ struct ContentView: View {
                     Spacer()
                     Button("收起键盘") { loginField = nil }
                 }
+            }
+            .sheet(isPresented: $showNetworkSetup) {
+                NetworkSetupView(endpoint: $endpoint)
             }
         }
     }

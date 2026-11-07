@@ -12,7 +12,7 @@ mobile/ios/
 scripts/build-ios-unsigned.sh
 ```
 
-可以上传整个 TailDesk 项目，也可以解压 `dist/TailDesk-Mobile-0.5-source.zip` 后上传其中内容。
+可以上传整个 TailDesk 项目，也可以解压 `dist/TailDesk-iOS-0.13-source.zip` 后上传其中内容。
 
 ## 2. 云端生成 IPA
 
@@ -40,9 +40,9 @@ AltServer 应保持运行，并与 iPhone 位于同一 Wi-Fi，以便自动刷�
 
 ## 4. 连接 TailDesk 电脑端
 
-1. iPhone 和电脑登录同一个可互访的 Tailscale 网络。
-2. 电脑端 TailDesk 0.5 启用“无人值守密码”和“手机入口”，然后开启被控。
-3. App 地址填写 `100.x.x.x:59011`，不要填写 `http://`。
+1. iPhone 和电脑位于同一局域网、同一 EasyTier 网络或同一可互访的 Tailscale 网络。
+2. 电脑端 TailDesk 0.13 启用“无人值守密码”和“手机入口”，然后开启被控。
+3. App 地址填写 `10.x.x.x:59011`、`192.168.x.x:59011` 或 `100.x.x.x:59011`，不要填写 `http://`。
 4. 输入无人值守密码并连接。
 5. 首次出现本地网络权限提示时选择允许。
 
@@ -52,4 +52,6 @@ AltServer 应保持运行，并与 iPhone 位于同一 Wi-Fi，以便自动刷�
 - GitHub 构建失败：打开失败步骤并下载日志，不要只截取最后一行。
 - App 打不开：确认已开启开发者模式、开发者已信任，且 7 天个人签名未过期。
 - 连接超时：确认手机 Tailscale 在线、填写的是电脑窗口显示的手机端口、Windows 防火墙允许该端口。
+
+国内 P2P 的完整配置、EasyTier iOS 限制与故障排查见 `TAILDESK_013_DEPLOYMENT.md`。
 

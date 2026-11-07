@@ -1,6 +1,6 @@
-# TailDesk iOS 0.12
+# TailDesk iOS 0.13
 
-原生 SwiftUI/UIKit 客户端，连接电脑端显示的 `Tailscale IPv4:手机端口`。
+原生 SwiftUI/UIKit 客户端，连接电脑端显示的 `EasyTier / Tailscale / 局域网 IPv4:手机端口`。
 
 ## 构建
 
@@ -10,7 +10,9 @@
 4. 打开 `TailDeskMobile.xcodeproj`，在 Signing & Capabilities 选择自己的 Team。
 5. 选择真机后运行，或用 Product > Archive 导出签名 App。
 
-当前版本要求 iOS 16+。HTTP/WebSocket 只允许 App 内部校验通过的 Tailscale CGNAT IPv4；传输层由 Tailscale 加密，不应把电脑端口转发到公网。
+当前版本要求 iOS 16+。HTTP/WebSocket 只允许 App 内部校验通过的私有 IPv4、Tailscale CGNAT IPv4 或回环地址，不应把电脑端口转发到公网。
+
+0.13 新增国内 P2P 配置导入页。Windows TailDesk 可复制 `TDNET1` 配置，iOS 导入后逐项复制到 EasyTier iOS，并自动填写电脑虚拟 IP连接地址。系统虚拟网卡依赖 Apple Network Extension entitlement，免费 AltServer 签名通常仍需单独的 EasyTier iOS App。
 
 0.7 新增不透明 App 图标、Keychain 密码历史、电脑名/IP 历史选择，以及横屏沉浸式全屏控制。进入全屏时虚拟鼠标默认隐藏，可通过右上角按钮随时调出；双指缩放和移动继续可用。
 
