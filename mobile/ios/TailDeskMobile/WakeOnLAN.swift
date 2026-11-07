@@ -16,22 +16,45 @@ enum WakeOnLAN {
             throw WakeError("系统未允许局域网广播")
         }
 
-        var address = sockaddr_in()
-        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_addr = in_addr(s_addr: inet_addr("255.255.255.255"))
-
-        for port in [9, 7] {
-            address.sin_port = in_port_t(UInt16(port).bigEndian)
-            let sent = packet.withUnsafeBytes { bytes in
-                withUnsafePointer(to: &address) { pointer in
-                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                        Darwin.sendto(socketDescriptor, bytes.baseAddress, bytes.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        for target in broadcastTargets() {
+            var address = sockaddr_in()
+            address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            address.sin_family = sa_family_t(AF_INET)
+            address.sin_addr = in_addr(s_addr: target)
+            for _ in 0..<3 {
+                for port in [9, 7] {
+                    address.sin_port = in_port_t(UInt16(port).bigEndian)
+                    let sent = packet.withUnsafeBytes { bytes in
+                        withUnsafePointer(to: &address) { pointer in
+                            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                                Darwin.sendto(socketDescriptor, bytes.baseAddress, bytes.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                            }
+                        }
                     }
+                    guard sent == packet.count else { throw WakeError("Wake-on-LAN 魔术包发送失败") }
                 }
             }
-            guard sent == packet.count else { throw WakeError("Wake-on-LAN 魔术包发送失败") }
         }
+    }
+
+    private static func broadcastTargets() -> [in_addr_t] {
+        var targets = [inet_addr("255.255.255.255")]
+        var interfaces: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&interfaces) == 0, let first = interfaces else { return targets }
+        defer { freeifaddrs(interfaces) }
+        var current: UnsafeMutablePointer<ifaddrs>? = first
+        while let entry = current {
+            defer { current = entry.pointee.ifa_next }
+            guard let address = entry.pointee.ifa_addr,
+                  let netmask = entry.pointee.ifa_netmask,
+                  address.pointee.sa_family == UInt8(AF_INET),
+                  String(cString: entry.pointee.ifa_name) == "en0" else { continue }
+            let ip = UnsafeRawPointer(address).assumingMemoryBound(to: sockaddr_in.self).pointee.sin_addr.s_addr
+            let mask = UnsafeRawPointer(netmask).assumingMemoryBound(to: sockaddr_in.self).pointee.sin_addr.s_addr
+            let directed = (ip & mask) | ~mask
+            if !targets.contains(directed) { targets.append(directed) }
+        }
+        return targets
     }
 
     private static func parse(_ value: String) throws -> [UInt8] {

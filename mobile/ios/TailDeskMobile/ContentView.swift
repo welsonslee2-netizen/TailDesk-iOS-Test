@@ -185,7 +185,10 @@ struct ContentView: View {
             }
             connecting = false
             if client.connected {
-                history.save(endpoint: submittedEndpoint, computer: client.computer, password: submittedPassword, macAddress: submittedMac)
+                let detectedMac = client.computerMac.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !detectedMac.isEmpty { macAddress = detectedMac }
+                history.save(endpoint: submittedEndpoint, computer: client.computer, password: submittedPassword,
+                             macAddress: detectedMac.isEmpty ? submittedMac : detectedMac)
                 password = ""
             } else if wakeSent {
                 client.status = "已发送唤醒包，但电脑尚未上线。请检查有线网卡、BIOS Wake-on-LAN 和局域网条件。"

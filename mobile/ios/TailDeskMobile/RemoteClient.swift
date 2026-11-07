@@ -8,6 +8,7 @@ final class RemoteClient: ObservableObject {
     @Published var status = "尚未连接"
     @Published var connected = false
     @Published var computer = ""
+    @Published var computerMac = ""
     @Published var rtt = 0
 
     private var session: URLSession?
@@ -32,7 +33,7 @@ final class RemoteClient: ObservableObject {
     @Published private(set) var pointerX = 32768
     @Published private(set) var pointerY = 32768
 
-    private struct LoginReply: Decodable { let csrf: String; let computer: String }
+    private struct LoginReply: Decodable { let csrf: String; let computer: String; let mac: String? }
     private struct ErrorReply: Decodable { let error: String }
 
     func connect(endpoint: String, password: String) async {
@@ -61,6 +62,7 @@ final class RemoteClient: ObservableObject {
             let login = try JSONDecoder().decode(LoginReply.self, from: data)
             csrf = login.csrf
             computer = login.computer
+            computerMac = login.mac ?? ""
             try await verifySession(session: currentSession, address: address)
             do {
                 try await openSocket(session: currentSession, address: address)
@@ -173,6 +175,10 @@ final class RemoteClient: ObservableObject {
                             if selectedQuality == -1 { sendQuality(rtt > 140 ? 2 : 1) }
                         } else if json["type"] as? String == "error", let message = json["message"] as? String {
                             status = message
+                        } else if json["type"] as? String == "clipboard", let value = json["text"] as? String,
+                                  !value.isEmpty, value.utf8.count <= 256 * 1024 {
+                            UIPasteboard.general.string = value
+                            status = "已同步被控电脑剪贴板，可切换到其他 App 粘贴"
                         }
                     }
                 @unknown default: break
