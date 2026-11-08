@@ -1,5 +1,6 @@
 import Foundation
 import ImageIO
+import Security
 import UIKit
 
 @MainActor
@@ -15,6 +16,7 @@ final class RemoteClient: ObservableObject {
     private var socket: URLSessionWebSocketTask?
     private var baseURL: URL?
     private var csrf = ""
+    private var cipher: MobileSessionCipher?
     private var heartbeat: Task<Void, Never>?
     private var receiver: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
@@ -41,7 +43,14 @@ final class RemoteClient: ObservableObject {
         let csrf: String
         let computer: String
         let mac: String?
+        let serverProof: String
         let features: [String]?
+    }
+    private struct ChallengeReply: Decodable {
+        let id: String
+        let salt: String
+        let iterations: Int
+        let serverNonce: String
     }
     private struct ErrorReply: Decodable { let error: String }
 
@@ -61,19 +70,55 @@ final class RemoteClient: ObservableObject {
             let currentSession = URLSession(configuration: configuration)
             session = currentSession
 
+            var challengeRequest = URLRequest(url: address.appendingPathComponent("challenge"))
+            challengeRequest.httpMethod = "POST"
+            challengeRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            challengeRequest.httpBody = Data("{}".utf8)
+            let (challengeData, challengeResponse) = try await currentSession.data(for: challengeRequest)
+            guard let challengeHTTP = challengeResponse as? HTTPURLResponse, challengeHTTP.statusCode == 200 else {
+                throw ClientError(Self.serverError(challengeData, fallback: "加密挑战请求失败"))
+            }
+            let challenge = try JSONDecoder().decode(ChallengeReply.self, from: challengeData)
+            guard challenge.iterations >= 100_000, challenge.iterations <= 1_000_000,
+                  let salt = Data(base64Encoded: challenge.salt), salt.count == 16,
+                  let serverNonce = Data(base64Encoded: challenge.serverNonce), serverNonce.count == 32 else {
+                throw ClientError("电脑端返回的加密参数无效")
+            }
+            status = "正在生成本地密码证明…"
+            let passwordKey = await MobileCrypto.derivePassword(password, salt: salt, iterations: challenge.iterations)
+            var nonceBytes = [UInt8](repeating: 0, count: 32)
+            let randomStatus = nonceBytes.withUnsafeMutableBytes {
+                SecRandomCopyBytes(kSecRandomDefault, $0.count, $0.baseAddress!)
+            }
+            guard randomStatus == errSecSuccess else {
+                throw ClientError("系统随机数生成失败")
+            }
+            let clientNonce = Data(nonceBytes)
+            let clientProof = MobileCrypto.proof(key: passwordKey, role: "client", id: challenge.id,
+                                                  serverNonce: serverNonce, clientNonce: clientNonce)
             var request = URLRequest(url: address.appendingPathComponent("login"))
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try JSONSerialization.data(withJSONObject: ["password": password])
+            request.httpBody = try JSONSerialization.data(withJSONObject: [
+                "id": challenge.id,
+                "clientNonce": clientNonce.base64EncodedString(),
+                "proof": clientProof.base64EncodedString()
+            ])
             let (data, response) = try await currentSession.data(for: request)
             guard let http = response as? HTTPURLResponse else { throw ClientError("登录响应无效") }
             guard http.statusCode == 200 else { throw ClientError(Self.serverError(data, fallback: "密码验证失败（\(http.statusCode)）")) }
             let login = try JSONDecoder().decode(LoginReply.self, from: data)
+            guard let serverProof = Data(base64Encoded: login.serverProof),
+                  serverProof == MobileCrypto.proof(key: passwordKey, role: "server", id: challenge.id,
+                                                    serverNonce: serverNonce, clientNonce: clientNonce),
+                  login.features?.contains("e2ee-aesgcm-v1") == true else {
+                throw ClientError("电脑端身份或端到端加密能力验证失败")
+            }
+            cipher = MobileSessionCipher(passwordKey: passwordKey, serverNonce: serverNonce, clientNonce: clientNonce)
             csrf = login.csrf
             computer = login.computer
             computerMac = login.mac ?? ""
             supportsCursorMode = login.features?.contains("cursor-mode-v1") == true
-            try await verifySession(session: currentSession, address: address)
             do {
                 try await openSocket(session: currentSession, address: address)
             } catch {
@@ -82,15 +127,6 @@ final class RemoteClient: ObservableObject {
         } catch {
             status = error.localizedDescription
             connected = false
-        }
-    }
-
-    private func verifySession(session: URLSession, address: URL) async throws {
-        let request = URLRequest(url: address.appendingPathComponent("session"))
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw ClientError("会话验证响应无效") }
-        guard http.statusCode == 200 else {
-            throw ClientError(Self.serverError(data, fallback: "会话 Cookie 验证失败（\(http.statusCode)）"))
         }
     }
 
@@ -105,7 +141,7 @@ final class RemoteClient: ObservableObject {
             request.setValue(fields["Cookie"], forHTTPHeaderField: "Cookie")
         }
         let task = session.webSocketTask(with: request)
-        task.maximumMessageSize = 8 * 1024 * 1024
+        task.maximumMessageSize = 8 * 1024 * 1024 + 64
         socket = task
         task.resume()
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -117,7 +153,7 @@ final class RemoteClient: ObservableObject {
         guard socket === task else { throw ClientError("长连接已取消") }
         httpMode = false
         connected = true
-        status = "已连接 · \(computer) · WebSocket"
+        status = "已连接 · \(computer) · 端到端加密"
         quality(selectedQuality)
         sendCursorMode()
         receiver = Task { [weak self] in await self?.receiveLoop(task) }
@@ -129,7 +165,7 @@ final class RemoteClient: ObservableObject {
         socket = nil
         httpMode = true
         connected = true
-        status = "已连接 · \(computer) · 兼容模式"
+        status = "已连接 · \(computer) · 加密兼容模式"
         sendCursorMode()
         frameTask?.cancel()
         frameTask = Task { [weak self] in await self?.httpFrameLoop(session: session, address: address) }
@@ -145,9 +181,12 @@ final class RemoteClient: ObservableObject {
                 let started = Date()
                 let (data, response) = try await session.data(for: request)
                 guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-                      ["image/jpeg", "image/png"].contains(http.value(forHTTPHeaderField: "Content-Type")?.split(separator: ";").first.map(String.init) ?? ""),
-                      data.count <= 8 * 1024 * 1024,
-                      let image = await Self.decodeImage(data) else {
+                      http.value(forHTTPHeaderField: "Content-Type")?.hasPrefix("application/octet-stream") == true,
+                      data.count <= 8 * 1024 * 1024 + 64,
+                      let cipher else { throw ClientError("加密兼容模式响应无效") }
+                let (kind, payload) = try cipher.open(data)
+                guard kind == .frameJPEG || kind == .framePNG,
+                      let image = await Self.decodeImage(payload) else {
                     throw ClientError("兼容模式画面响应无效")
                 }
                 frame = image
@@ -176,30 +215,39 @@ final class RemoteClient: ObservableObject {
                 let message = try await task.receive()
                 switch message {
                 case .data(let data):
-                    guard data.count <= 8 * 1024 * 1024 else { throw ClientError("远程画面数据过大") }
-                    enqueueFrame(data, from: task)
-                    retryCount = 0
-                case .string(let text):
-                    if let data = text.data(using: .utf8),
-                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                        if json["type"] as? String == "pong" {
-                            retryCount = 0
-                            rtt = max(0, Int(Date().timeIntervalSince(lastPing) * 1000))
-                            status = "已连接 · \(computer) · RTT \(rtt) ms"
-                            if selectedQuality == -1 { sendQuality(rtt > 140 ? 2 : 1) }
-                        } else if json["type"] as? String == "error", let message = json["message"] as? String {
-                            status = message
-                        } else if json["type"] as? String == "clipboard", let value = json["text"] as? String,
-                                  !value.isEmpty, value.utf8.count <= 256 * 1024 {
-                            UIPasteboard.general.string = value
-                            status = "已同步被控电脑剪贴板，可切换到其他 App 粘贴"
-                        }
+                    guard data.count <= 8 * 1024 * 1024 + 64, let cipher else { throw ClientError("远程加密数据无效") }
+                    let (kind, payload) = try cipher.open(data)
+                    if kind == .frameJPEG || kind == .framePNG {
+                        enqueueFrame(payload, from: task)
+                    } else if kind == .json {
+                        try handleJSON(payload)
                     }
+                    retryCount = 0
+                case .string:
+                    throw ClientError("电脑端发送了未加密消息")
                 @unknown default: break
                 }
             }
         } catch {
             if socket === task { connectionEnded(error.localizedDescription) }
+        }
+    }
+
+    private func handleJSON(_ data: Data) throws {
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw ClientError("加密控制消息格式无效")
+        }
+        if json["type"] as? String == "pong" {
+            retryCount = 0
+            rtt = max(0, Int(Date().timeIntervalSince(lastPing) * 1000))
+            status = "已连接 · \(computer) · AES-GCM · RTT \(rtt) ms"
+            if selectedQuality == -1 { sendQuality(rtt > 140 ? 2 : 1) }
+        } else if json["type"] as? String == "error", let message = json["message"] as? String {
+            status = message
+        } else if json["type"] as? String == "clipboard", let value = json["text"] as? String,
+                  !value.isEmpty, value.utf8.count <= 256 * 1024 {
+            UIPasteboard.general.string = value
+            status = "已通过端到端加密同步剪贴板"
         }
     }
 
@@ -282,9 +330,9 @@ final class RemoteClient: ObservableObject {
             scheduleHTTPFlush()
             return
         }
-        guard let socket, let data = try? JSONSerialization.data(withJSONObject: object),
-              let text = String(data: data, encoding: .utf8) else { return }
-        socket.send(.string(text)) { [weak self] error in
+        guard let socket, let data = try? JSONSerialization.data(withJSONObject: object), let cipher,
+              let secured = try? cipher.seal(kind: .json, payload: data) else { return }
+        socket.send(.data(secured)) { [weak self] error in
             if let error { Task { @MainActor in self?.connectionEnded(error.localizedDescription) } }
         }
     }
@@ -292,7 +340,7 @@ final class RemoteClient: ObservableObject {
     private func scheduleMoveFlush() {
         guard moveFlushTask == nil else { return }
         moveFlushTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 12_000_000)
+            try? await Task.sleep(nanoseconds: 8_000_000)
             guard !Task.isCancelled else { return }
             self?.moveFlushTask = nil
             self?.flushPendingMove()
@@ -393,9 +441,10 @@ final class RemoteClient: ObservableObject {
         do {
             var request = URLRequest(url: address.appendingPathComponent("input"))
             request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
             request.setValue(csrf, forHTTPHeaderField: "X-TailDesk-CSRF")
-            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            guard let cipher else { throw ClientError("加密会话已结束") }
+            request.httpBody = try cipher.seal(kind: .json, payload: JSONSerialization.data(withJSONObject: body))
             let (data, response) = try await currentSession.data(for: request)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
                 throw ClientError(Self.serverError(data, fallback: "输入发送失败"))
@@ -417,6 +466,7 @@ final class RemoteClient: ObservableObject {
         socket = nil; receiver = nil; heartbeat = nil; reconnectTask = nil; frameTask = nil; decoderTask = nil; httpFlushTask = nil; moveFlushTask = nil
         httpQueue.removeAll(); pendingFrameData = nil; pendingFrameSocket = nil; pendingMove = nil; httpMode = false
         supportsCursorMode = false; decodeFailures = 0
+        cipher = nil
         connected = false; frame = nil
         if logout, let address, let currentSession, !token.isEmpty {
             Task {

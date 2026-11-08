@@ -6,9 +6,10 @@ struct NetworkSetupView: View {
     @Binding var endpoint: String
     @State private var network = ""
     @State private var secret = ""
-    @State private var peer = "tcp://public.easytier.top:11010"
+    @State private var peer = "tcp://easytier-us.slarker.me:11010"
     @State private var computerIP = ""
     @State private var phoneIP = ""
+    @State private var secureMode = true
     @State private var message = "先在 Windows TailDesk 设置中复制 iOS 配置代码。"
 
     var body: some View {
@@ -24,6 +25,7 @@ struct NetworkSetupView: View {
                         copyRow("网络密钥", value: secret, privateValue: true)
                         copyRow("公共节点", value: peer)
                         copyRow("iPhone 虚拟 IP", value: phoneIP)
+                        copyRow("安全模式", value: secureMode ? "开启（Secure Mode）" : "关闭")
                     }
                     Section("TailDesk 连接地址") {
                         Text("电脑虚拟 IP：\(computerIP)")
@@ -36,7 +38,8 @@ struct NetworkSetupView: View {
                 Section("使用顺序") {
                     Text("1. 在 iPhone 安装并打开 EasyTier iOS。")
                     Text("2. 新建网络，逐项复制上面的名称、密钥、公共节点和 iPhone 虚拟 IP。")
-                    Text("3. EasyTier 显示已连接后，返回 TailDesk，使用电脑虚拟 IP 连接。")
+                    Text("3. 在 EasyTier iOS 的高级设置中，将 Secure Mode 与上面显示保持一致；加密算法选择 AES-256-GCM。")
+                    Text("4. EasyTier 显示已连接后，返回 TailDesk，使用电脑虚拟 IP 连接。")
                     Text("每台设备的虚拟 IP 必须不同；网络名称、密钥和公共节点必须相同。")
                 }
                 Section("iOS 系统限制") {
@@ -65,20 +68,22 @@ struct NetworkSetupView: View {
 
     private func importCode() {
         guard let raw = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines),
-              raw.hasPrefix("TDNET1:"),
+              raw.hasPrefix("TDNET1:") || raw.hasPrefix("TDNET2:"),
               let data = Data(base64Encoded: String(raw.dropFirst(7))),
               let text = String(data: data, encoding: .utf8) else {
             message = "剪贴板中没有有效的 TDNET1 配置代码。"
             return
         }
         let values = text.components(separatedBy: "\n")
-        guard values.count == 4, !values[0].isEmpty, values[1].count >= 12 else {
+        guard values.count >= 4, !values[0].isEmpty, values[1].count >= 12 else {
             message = "配置代码内容不完整。"
             return
         }
         network = values[0]; secret = values[1]; peer = values[2]; computerIP = values[3]
+        secureMode = values.count >= 5 && values[4] == "secure"
         phoneIP = Self.nextAddress(after: computerIP) ?? "请填写另一未占用私有 IP"
-        message = "配置已导入。请按下面顺序复制到 EasyTier iOS。"
+        message = "配置已导入。敏感网络密钥已从系统剪贴板清除。"
+        UIPasteboard.general.items = []
     }
 
     private static func nextAddress(after address: String) -> String? {
